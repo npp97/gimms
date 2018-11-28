@@ -2,44 +2,124 @@ if ( !isGeneric("downloadGimms") ) {
   setGeneric("downloadGimms", function(x, ...)
     standardGeneric("downloadGimms"))
 }
-#' Download GIMMS 3G data
+#' Download GIMMS NDVI3g Data
 #'
 #' @description
-#' Download GIMMS 3G binary data for a given time span from NASA FTP server
-#' (\url{http://ecocast.arc.nasa.gov/data/pub/gimms/3g.v0/}).
+#' Download GIMMS NDVI3g data from the NASA Ames Ecological Forecasting Lab,
+#' optionally for a given period of time. Both NDVI3g.v1 (NetCDF, until end
+#' 2015) and NDVI3g.v0 (ENVI binary, until end 2013) are available.
 #'
-#' @param x If 'numeric', start year for download (e.g. 2000). If 'character',
-#' a vector of full online filepath(s) to download, typically returned from
-#' \code{\link{updateInventory}}. If not supplied, download will start from the
-#' first year available.
-#' @param y 'numeric'. End year for download. If not supplied, download will
-#' stop at the last year available.
-#' @param dsn 'character'. Destination folder for file download. If not supplied,
-#' all downloaded files will be stored in the current working directory.
-#' @param overwrite Logical. If \code{TRUE}, already downloaded files in 'dsn'
-#' will be overwritten.
-#' @param quiet Logical. If \code{TRUE}, information sent to the console is
+#' @param x Start time for data download as either \code{Date} object (e.g.,
+#' \code{as.Date("2000-01-01")}) or \code{numeric} year (e.g., \code{2000}).
+#' Alternatively, a \code{character} vector of online filepaths to download
+#' created from \code{\link{updateInventory}}. If \code{missing}, all files
+#' available only are being downloaded.
+#' @param y End time for data download as either \code{Date} object or
+#' \code{numeric} year. Ignored if 'x' is a \code{character} object or missing.
+#' @param version \code{integer} (or any other convertible class), defaults to
+#' \code{1L}. Specifies desired GIMMS NDVI3g product version, see 'Details' in
+#' \code{\link{updateInventory}}. Ignored if 'x' is a \code{character} object.
+#' @param dsn \code{character}, defaults to the current working directory.
+#' Target folder for file download.
+#' @param overwrite \code{logical}, defaults to \code{FALSE}. If \code{TRUE},
+#' identically named files in 'dsn' will be overwritten.
+#' @param quiet \code{logical}. If \code{TRUE} (default), console output is
 #' reduced.
-#' @param ... Further arguments passed on to \code{\link{download.file}}.
+#' @param mode \code{character}. See \code{\link{download.file}}.
+#' @param cores \code{integer}, defaults to \code{1L}. Number of cores used for
+#' parallel processing. Note that a fast internet connection is required in
+#' order for parallelization to take effect.
+#' @param ... Further arguments passed to \code{\link{download.file}}, e.g.
+#' 'method'.
 #'
 #' @return
-#' A vector of filepaths.
-#'
-#' @author
-#' Florian Detsch
+#' A \code{character} vector of local filepaths.
 #'
 #' @seealso
-#' \code{\link{download.file}}
+#' \code{\link{updateInventory}}, \code{\link{download.file}}.
 #'
 #' @examples
 #' \dontrun{
-#' ## Download GIMMS NDVI3g binary data from 2000-2005 (this might take some time...)
-#' gimms_files <- downloadGimms(x = 2000, y = 2005,
-#'                              dsn = paste0(getwd(), "/data"))
-#' gimms_files[1:10]
+#' tmp <- tempdir()
+#'
+#' ## 'Date' method
+#' gimms_files_date <- downloadGimms(x = as.Date("2000-01-01"),
+#'                                   y = as.Date("2000-12-31"),
+#'                                   dsn = tmp)
+#'
+#' ## 'numeric' method (i.e., particular years)
+#' gimms_files_year <- downloadGimms(x = 2000,
+#'                                   y = 2002,
+#'                                   dsn = tmp)
+#'
+#' ## 'character' method (i.e., particular files)
+#' ecocast <- system.file("extdata", "inventory_ecv1.rds", package = "gimms")
+#' gimms_files_char <- readRDS(ecocast)
+#' gimms_files_char <- downloadGimms(x = gimms_files_char[1:6],
+#'                                   dsn = tmp)
+#'
+#' ## 'missing' method (i.e., entire collection)
+#' gimms_files_full <- downloadGimms(dsn = tmp)
 #' }
+#'
 #' @export downloadGimms
 #' @name downloadGimms
+
+################################################################################
+### function using 'Date' input ################################################
+#' @aliases downloadGimms,Date-method
+#' @rdname downloadGimms
+setMethod("downloadGimms",
+          signature(x = "Date"),
+          function(x, y, version = 1L,
+                   dsn = getwd(), overwrite = FALSE, quiet = TRUE,
+                   mode = "wb", cores = 1L, ...) {
+
+            ## check if target folder exists
+            checkDsn(dsn)
+
+            ## check 'cores'
+            cores <- checkCores(cores)
+
+            ## jump to downloadGimms,missing-method if neither 'x' nor 'y' is specified
+            if (missing(x) & missing(y))
+              downloadGimms(version = version, dsn = dsn, overwrite = overwrite,
+                            quiet = quiet, mode = mode, cores = cores, ...)
+
+            ## available files and corresponding dates
+            fls <- updateInventory(version = version)
+            dts <- monthlyIndices(fls, version = version, timestamp = TRUE)
+
+            ## start (finish) with the first (last) timestamp available if 'x'
+            ## ('y') is not specified
+            if (missing(x)) x <- dts[1]
+            if (missing(y)) y <- dts[length(dts)]
+
+            ## select files covering user-defined temporal range...
+            usr_dts <- seq(x, y, 1)
+            usr_dts <- usr_dts[which(substr(usr_dts, 9, 10) %in% c("01", "15"))]
+
+            ## ...from version 0
+            fls <- if (version == 0) {
+              fls[dts %in% usr_dts]
+
+            ## ...from version 1
+            } else {
+              # identify .nc4 files with at least 1 required date
+              lst <- readRDS(system.file("extdata", "dates_ecv1.rds",
+                                         package = "gimms"))
+
+              mat <- sapply(usr_dts, function(i) {
+                sapply(lst, function(j) any(i == j))
+              })
+              rownames(mat)[rowSums(mat) > 0]
+            }
+
+            ## download files
+            downloader(fls, dsn = dsn, overwrite = overwrite,
+                       quiet = quiet, mode = mode, cores = cores, ...)
+          })
+
 
 ################################################################################
 ### function using numeric input (i.e. years) ##################################
@@ -47,52 +127,52 @@ if ( !isGeneric("downloadGimms") ) {
 #' @rdname downloadGimms
 setMethod("downloadGimms",
           signature(x = "numeric"),
-          function(x, y,
+          function(x, y, version = 1L,
                    dsn = getwd(), overwrite = FALSE, quiet = TRUE,
-                   ...) {
+                   mode = "wb", cores = 1L, ...) {
 
-  ## jump to downloadGimms,missing-method if neither 'x' nor 'y' is specified
-  if (missing(x) & missing(y))
-    downloadGimms(dsn = dsn, overwrite = overwrite, quiet = quiet, ...)
+            ## check if target folder exists
+            checkDsn(dsn)
 
-  ## available files
-  gimms_fls <- updateInventory(sort = TRUE)
+            ## check 'cores'
+            cores <- checkCores(cores)
 
-  ## if specified, subset available files by time frame
-  gimms_bsn <- basename(gimms_fls)
-  gimms_yrs_chr <- substr(gimms_bsn, 4, 5)
-  gimms_yrs_num <- as.numeric(gimms_yrs_chr)
+            ## jump to downloadGimms,missing-method if neither 'x' nor 'y' is specified
+            if (missing(x) & missing(y))
+              downloadGimms(dsn = dsn, overwrite = overwrite, quiet = quiet,
+                            mode = mode, cores = cores, ...)
 
-  id_old <- gimms_yrs_num >= 81
-  id_new <- gimms_yrs_num <= 80
-  gimms_yrs_chr[id_old] <- paste0("19", gimms_yrs_chr[id_old])
-  gimms_yrs_chr[id_new] <- paste0("20", gimms_yrs_chr[id_new])
-  gimms_yrs_num <- as.numeric(gimms_yrs_chr)
+            ## available files
+            fls <- updateInventory(version = version)
 
-  ## start (finish) with the first (last) year available if 'x' ('y') is not
-  ## specified
-  if (missing(x)) x <- gimms_yrs_num[1]
-  if (missing(y)) y <- gimms_yrs_num[length(gimms_yrs_num)]
+            ## if specified, subset available files by time frame
+            bsn <- basename(fls)
+            yrs <- substr(bsn, ifelse(version == 1, 15, 4),
+                          ifelse(version == 1, 18, 5))
+            yrs <- as.numeric(yrs)
 
-  ## subset files
-  gimms_fls <- gimms_fls[gimms_yrs_chr %in% seq(x, y)]
+            ## if version 0, add leading century
+            if (version == 0) {
+              id_old <- yrs >= 81
+              id_new <- yrs <= 80
+              yrs[id_old] <- paste0("19", yrs[id_old])
+              yrs[id_new] <- paste0("20", formatC(as.integer(yrs[id_new]),
+                                                  width = 2, flag = "0"))
+              yrs <- as.numeric(yrs)
+            }
 
-  ## download
-  for (i in gimms_fls) {
-    destfile <- paste0(dsn, "/", basename(i))
-    if (file.exists(destfile) & !overwrite) {
-      if (!quiet)
-        cat("File", destfile, "already exists in destination folder. Proceeding to next file ...\n")
-    } else {
-      try(download.file(i, destfile = destfile, ...), silent = TRUE)
-    }
-  }
+            ## start (finish) with the first (last) year available if 'x' ('y')
+            ## is not specified
+            if (missing(x)) x <- yrs[1]
+            if (missing(y)) y <- yrs[length(yrs)]
 
-  ## return vector with output files
-  gimms_out <- paste0(dsn, "/", basename(gimms_fls))
-  return(gimms_out)
+            ## subset files
+            fls <- fls[yrs %in% seq(x, y)]
 
-})
+            ## download
+            downloader(fls, dsn = dsn, overwrite = overwrite,
+                       quiet = quiet, mode = mode, cores = cores, ...)
+          })
 
 
 ################################################################################
@@ -101,48 +181,38 @@ setMethod("downloadGimms",
 #' @rdname downloadGimms
 setMethod("downloadGimms",
           signature(x = "character"),
-          function(x, dsn = getwd(), overwrite = FALSE, quiet = TRUE, ...) {
+          function(x, dsn = getwd(), overwrite = FALSE, quiet = TRUE,
+                   mode = "wb", cores = 1L, ...) {
 
-  ## download
-  for (i in x) {
-    destfile <- paste0(dsn, "/", basename(i))
-    if (file.exists(destfile) & !overwrite) {
-      cat("File", destfile, "already exists in destination folder. Proceeding to next file ...\n")
-    } else {
-      try(download.file(i, destfile = destfile, ...), silent = TRUE)
-    }
-  }
+            ## check if target folder exists
+            checkDsn(dsn)
 
-  ## return vector with output files
-  gimms_out <- paste0(dsn, "/", basename(x))
-  return(gimms_out)
+            ## check 'cores'
+            cores <- checkCores(cores)
 
-})
+            ## download
+            downloader(x, dsn = dsn, overwrite = overwrite,
+                       quiet = quiet, mode = mode, cores = cores, ...)
+          })
 
 
 ################################################################################
-### function using character input (i.e. files) ################################
+### function using no input (i.e. download entire collection) ##################
 #' @aliases downloadGimms,missing-method
 #' @rdname downloadGimms
 setMethod("downloadGimms",
           signature(x = "missing"),
-          function(dsn = getwd(), overwrite = FALSE, quiet = TRUE, ...) {
+          function(version = 1L, dsn = getwd(), overwrite = FALSE, quiet = TRUE,
+                   mode = "wb", cores = 1L, ...) {
 
-  ## available files
-  gimms_fls <- updateInventory()
+            ## check if target folder exists
+            checkDsn(dsn)
 
-  ## download
-  for (i in gimms_fls) {
-    destfile <- paste0(dsn, "/", basename(i))
-    if (file.exists(destfile) & !overwrite) {
-      cat("File", destfile, "already exists in destination folder. Proceeding to next file ...\n")
-    } else {
-      try(download.file(i, destfile = destfile, ...), silent = TRUE)
-    }
-  }
+            ## check 'cores'
+            cores <- checkCores(cores)
 
-  ## return vector with output files
-  gimms_out <- paste0(dsn, "/", basename(gimms_fls))
-  return(gimms_out)
-
-})
+            ## download all available files
+            downloader(updateInventory(version = version), dsn = dsn,
+                       overwrite = overwrite, quiet = quiet, mode = mode,
+                       cores = cores, ...)
+          })
